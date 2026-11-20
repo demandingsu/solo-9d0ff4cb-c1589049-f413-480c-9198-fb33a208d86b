@@ -99,14 +99,17 @@
     <div class="card">
       <h2>演示辅助</h2>
       <button class="ghost" onclick="resetAll()">清空全部数据</button>
-      <button class="ghost" onclick="loadState()">刷新右侧状态</button>
+      <button class="ghost" onclick="refreshOverview()">刷新总览</button>
+      <div id="demoMsg" class="msg"></div>
     </div>
   </div>
 
   <div>
     <div class="card">
-      <h2>当前工位状态</h2>
-      <div id="stateBox"><p class="muted">点击“刷新右侧状态”加载。</p></div>
+      <h2>当前工位状态 <span id="overviewBusy" class="muted"
+        style="font-size:12px; font-weight:normal; display:none">（刷新中…）</span></h2>
+      <div id="overviewMsg" class="msg"></div>
+      <div id="stateBox"><p class="muted">加载中…</p></div>
     </div>
     <div class="card">
       <h2>交印单（按生效次序）</h2>
@@ -138,7 +141,7 @@ async function uploadLib() {
   try {
     const d = await post("/api/libraries", fd);
     show("libMsg", `已替换字库清单：${d.library_count} 个字库、${d.glyph_count} 个字模`, true);
-    loadState();
+    refreshOverview();
   } catch (e) { show("libMsg", e.message, false); }
 }
 async function uploadVol() {
@@ -149,7 +152,7 @@ async function uploadVol() {
   try {
     const d = await post(`/api/volumes/${encodeURIComponent(name)}/chars`, fd);
     show("volMsg", `册「${d.volume}」用字表已更新，共 ${d.char_count} 个字`, true);
-    loadState();
+    refreshOverview();
   } catch (e) { show("volMsg", e.message, false); }
 }
 async function submitVol() {
@@ -171,7 +174,7 @@ async function submitVol() {
       `共需字模：${d.pool_before.length} → ${d.pool_after.length}`];
     show("submitMsg", lines.join("\n"), true);
     document.getElementById("rawBox").textContent = JSON.stringify(d, null, 2);
-    loadState(); loadOrders();
+    refreshOverview();
   } catch (e) { show("submitMsg", e.message, false); }
 }
 async function fetchOrder() {
@@ -191,12 +194,57 @@ function downloadOrder() {
   window.open(`/api/orders/${encodeURIComponent(no)}/download`, "_blank");
 }
 async function resetAll() {
-  await fetch("/api/reset", { method:"POST" });
-  loadState(); loadOrders();
+  try {
+    const resp = await fetch("/api/reset", { method:"POST" });
+    const d = await resp.json();
+    if (!resp.ok) throw new Error(d.error || ("HTTP " + resp.status));
+    show("demoMsg", "已清空全部数据。", true);
+    refreshOverview();
+  } catch (e) { show("demoMsg", "清空失败：" + e.message, false); }
 }
 function ident(x) { return `${x.glyph_char}（${x.library_name}/${x.edition}/${x.matrix_no}）`; }
-async function loadState() {
-  const d = await (await fetch("/api/state")).json();
+
+// ---- 右侧总览：一次请求取同一份已提交快照，两块内容一起更新 ----
+// 多次刷新重叠时只采用“最后发起”的那次结果（晚到的旧结果直接丢弃）；
+// 刷新失败时保留上一次完整总览，并提示重试。
+let refreshSeq = 0;        // 已发起的刷新序号
+let overviewReady = false; // 是否已有一份完整总览可保留
+function setBusy(on) {
+  document.getElementById("overviewBusy").style.display = on ? "inline" : "none";
+}
+function clearOverviewError() {
+  const el = document.getElementById("overviewMsg");
+  el.className = "msg"; el.textContent = "";
+}
+function showOverviewError(msg) {
+  const el = document.getElementById("overviewMsg");
+  el.textContent = "总览刷新失败：" + msg +
+    (overviewReady ? "。已保留上一次完整总览，" : "。") + "请点击“刷新总览”重试。";
+  el.className = "msg err";
+}
+async function refreshOverview() {
+  const mySeq = ++refreshSeq;
+  setBusy(true);
+  try {
+    const resp = await fetch("/api/overview");
+    const d = await resp.json();
+    if (!resp.ok) throw new Error(d.error || ("HTTP " + resp.status));
+    if (mySeq !== refreshSeq) return; // 已有更新的刷新发起，丢弃本次晚到的旧结果
+    renderOverview(d);
+    overviewReady = true;
+    clearOverviewError();
+  } catch (e) {
+    if (mySeq !== refreshSeq) return; // 过期请求的结果（含失败）一律不采用
+    showOverviewError(e.message);
+  } finally {
+    if (mySeq === refreshSeq) setBusy(false);
+  }
+}
+function renderOverview(d) {
+  renderState(d.state);
+  renderOrders(d.orders);
+}
+function renderState(d) {
   const box = document.getElementById("stateBox");
   let html = `<p class="muted">当前生效字库：${d.libraries.map(l =>
       `${l.name}·${l.edition}(优先级${l.priority})`).join(" → ") || "（未上传）"}</p>`;
@@ -210,8 +258,7 @@ async function loadState() {
     d.shared_pool.map(ident).join("；") + "</p>";
   box.innerHTML = html || "<p class='muted'>暂无数据。</p>";
 }
-async function loadOrders() {
-  const d = await (await fetch("/api/orders")).json();
+function renderOrders(d) {
   const box = document.getElementById("ordersBox");
   if (!d.length) { box.innerHTML = "<p class='muted'>暂无。</p>"; return; }
   let html = "<table><tr><th>生效序</th><th>单号</th><th>册</th><th>增</th><th>减</th><th>操作</th></tr>";
@@ -224,7 +271,7 @@ async function loadOrders() {
   }
   box.innerHTML = html + "</table>";
 }
-loadState(); loadOrders();
+refreshOverview();
 </script>
 </body>
 </html>

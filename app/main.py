@@ -127,6 +127,11 @@ def state():
     return service.get_state()
 
 
+@app.get("/api/overview", summary="总览：同一次已提交快照内的状态 + 交印单列表")
+def overview():
+    return service.get_overview()
+
+
 @app.post("/api/reset", summary="清空全部数据（演示用）")
 def reset():
     service.reset_all()

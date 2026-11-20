@@ -24,9 +24,12 @@
 app/            FastAPI 应用（database/parsers/service/main）
 web/index.html  单页操作界面（上传、交印、重取、下载、状态总览）
 samples/        网页与接口可直接使用的样例 CSV（1 份字库清单 + 2 册用字表）
-tests/          pytest 端到端测试（10 个用例）
+tests/          pytest 端到端测试 + 网页总览逻辑 node 自测（web_overview_test.mjs）
 Dockerfile / docker-compose.yml
 ```
+
+网页右侧总览一次请求 `/api/overview`（同一份已提交快照），状态与交印单列表一起更新；
+多次刷新重叠只采用最后发起的结果，刷新失败保留上一次完整总览并提示重试。
 
 ## Docker Compose 启动
 
@@ -59,6 +62,7 @@ pytest -q
 | GET  | `/api/orders/{单号}` | 按单号原样重取 JSON |
 | GET  | `/api/orders/{单号}/download` | 下载增减单 CSV（带 BOM，Excel 直开） |
 | GET  | `/api/state` | 当前字库、各册用字/已交印字模、共需并集 |
+| GET  | `/api/overview` | 右侧总览：状态 + 交印单列表，取自同一次已提交快照（只读事务，不阻塞交印） |
 | POST | `/api/reset` | 清空全部数据（演示用） |
 | GET  | `/docs` | Swagger 交互文档 |
 
@@ -82,8 +86,12 @@ pytest -q
 
 ### 已验证（本环境实际运行）
 
-- `pytest` 10 个用例全部通过，含题目指定的**两册先后弃用同一字模**：
+- `pytest` 14 个用例全部通过，含题目指定的**两册先后弃用同一字模**：
   甲先弃时乙仍需 → 无减单；乙再弃（最后使用者）→ 减单含该字模；每单 pool 与各册并集逐单一致。
+- 总览一致性：`/api/overview` 与 `/api/state` + `/api/orders` 内容一致；只读快照进行中交印不被阻塞、
+  快照内不含新单；交印进行中并发读总览全部成功且自洽。
+- 网页总览逻辑 node 自测（`node tests/web_overview_test.mjs`，23 项）：响应倒序只采用最后发起的结果、
+  失败保留上一次完整总览并提示重试、上传/交印/清空成功后自动刷新。
 - 真实启动 uvicorn 用样例 CSV 冒烟：上传→两册交印（共享 6 字，池 14→24）→重复确认复用→
   幂等键复用→缺字 422 且沿用原清单→甲/乙先后弃“寒”→CSV 下载与按单号重取内容一致。
 - 4 册多线程并发交印：单号连续、逐单共需 3/6/9/12 与当时各册并集一致。

@@ -377,65 +377,101 @@ def get_order(order_no: str) -> dict:
         conn.close()
 
 
+def _orders_snapshot(
+    conn: sqlite3.Connection, volume_name: str | None = None
+) -> list[dict]:
+    """在已有连接上读取交印单列表（供一致性快照复用）。"""
+    if volume_name:
+        rows = conn.execute(
+            "SELECT order_no, seq, volume_name, created_at, payload_json "
+            "FROM orders WHERE volume_name=? ORDER BY seq",
+            (volume_name,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT order_no, seq, volume_name, created_at, payload_json "
+            "FROM orders ORDER BY seq"
+        ).fetchall()
+    result = []
+    for r in rows:
+        p = json.loads(r["payload_json"])
+        result.append(
+            {
+                "order_no": r["order_no"],
+                "seq": r["seq"],
+                "volume": r["volume_name"],
+                "created_at": r["created_at"],
+                "added_count": len(p["added"]),
+                "removed_count": len(p["removed"]),
+            }
+        )
+    return result
+
+
 def list_orders(volume_name: str | None = None) -> list[dict]:
     conn = connect()
     try:
-        if volume_name:
-            rows = conn.execute(
-                "SELECT order_no, seq, volume_name, created_at, payload_json "
-                "FROM orders WHERE volume_name=? ORDER BY seq",
-                (volume_name,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT order_no, seq, volume_name, created_at, payload_json "
-                "FROM orders ORDER BY seq"
-            ).fetchall()
-        result = []
-        for r in rows:
-            p = json.loads(r["payload_json"])
-            result.append(
-                {
-                    "order_no": r["order_no"],
-                    "seq": r["seq"],
-                    "volume": r["volume_name"],
-                    "created_at": r["created_at"],
-                    "added_count": len(p["added"]),
-                    "removed_count": len(p["removed"]),
-                }
-            )
-        return result
+        return _orders_snapshot(conn, volume_name)
     finally:
         conn.close()
+
+
+def _state_snapshot(conn: sqlite3.Connection) -> dict:
+    """在已有连接上读取工位状态（供一致性快照复用）。"""
+    libs = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT name, edition, priority, current FROM libraries "
+            "WHERE current=1 ORDER BY priority"
+        ).fetchall()
+    ]
+    volumes = []
+    for v in conn.execute("SELECT volume_id, name FROM volumes ORDER BY volume_id"):
+        chars = [
+            r["glyph_char"]
+            for r in conn.execute(
+                "SELECT glyph_char FROM volume_chars WHERE volume_id=? "
+                "ORDER BY source_order",
+                (v["volume_id"],),
+            ).fetchall()
+        ]
+        active = _load_active_identities(conn, v["volume_id"])
+        volumes.append(
+            {"volume": v["name"], "chars": chars, "active_matrices": active}
+        )
+    pool = _load_pool(conn)
+    return {"libraries": libs, "volumes": volumes, "shared_pool": pool}
 
 
 def get_state() -> dict:
     """当前工位全貌：字库、各册用字与已交印字模、共需并集。"""
     conn = connect()
     try:
-        libs = [
-            dict(r)
-            for r in conn.execute(
-                "SELECT name, edition, priority, current FROM libraries "
-                "WHERE current=1 ORDER BY priority"
-            ).fetchall()
-        ]
-        volumes = []
-        for v in conn.execute("SELECT volume_id, name FROM volumes ORDER BY volume_id"):
-            chars = [
-                r["glyph_char"]
-                for r in conn.execute(
-                    "SELECT glyph_char FROM volume_chars WHERE volume_id=? "
-                    "ORDER BY source_order",
-                    (v["volume_id"],),
-                ).fetchall()
-            ]
-            active = _load_active_identities(conn, v["volume_id"])
-            volumes.append(
-                {"volume": v["name"], "chars": chars, "active_matrices": active}
-            )
-        pool = _load_pool(conn)
-        return {"libraries": libs, "volumes": volumes, "shared_pool": pool}
+        return _state_snapshot(conn)
+    finally:
+        conn.close()
+
+
+def get_overview() -> dict:
+    """右侧总览：状态 + 交印单列表，取自同一次已提交的工位状态。
+
+    全部内容在同一只读事务（WAL 快照）内读取，保证现行字库、各册用字与
+    已交印字模、共需并集、交印单列表互相一致、一起更新；只读事务不取写锁，
+    总览读取尚未完成时其他人仍可提交交印。
+    """
+    conn = connect()
+    try:
+        # 延迟（deferred）读事务：WAL 下固定一份已提交快照，读写互不阻塞。
+        conn.execute("BEGIN")
+        snapshot = {
+            "state": _state_snapshot(conn),
+            "orders": _orders_snapshot(conn),
+        }
+        conn.commit()
+        return snapshot
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
